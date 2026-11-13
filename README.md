@@ -3,7 +3,9 @@
 An interactive 3D model of a human cell, built entirely from code — one organelle at a time.
 Single HTML file, [three.js](https://threejs.org/), no build step.
 
-![Overview](screenshots/overview.png)
+[![Overview](screenshots/overview.png)](cell-tour.mp4)
+
+**▶ [Watch the narrated video](cell-tour.mp4)** (1:53, 1080×1080, rendered frame-by-frame from the same code)
 
 ## Run it
 
