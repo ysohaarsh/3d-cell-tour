@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>One human cell</title>
+<style>
+  :root { --ink:#1b1714; --mute:#6f6862; --line:#2a1a14; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:#fff; color:var(--ink); overflow:hidden;
+    font-family:"Helvetica Neue","Inter","Segoe UI",system-ui,Arial,sans-serif; }
+  canvas#c { position:fixed; inset:0; width:100%; height:100%; display:block; touch-action:none; }
+
+  #cap { position:fixed; left:24px; bottom:44px; max-width:min(560px,calc(100vw - 48px));
+    padding:14px 18px 14px 16px; background:rgba(255,255,255,.9); border-radius:4px;
+    transition:opacity .25s, transform .25s; pointer-events:none; }
+  #cap.out { opacity:0; transform:translateY(6px); }
+  #cap h1 { margin:0; font-size:clamp(24px,3.4vw,36px); letter-spacing:-.02em; line-height:1.1;
+    display:flex; align-items:center; gap:.4em; }
+  #cap h1 i { width:.55em; height:.55em; border:1.5px solid var(--line); flex:none; }
+  #cap p { margin:.45em 0 0; font-size:clamp(16px,2vw,21px); line-height:1.35; }
+  #cap p.note { color:var(--mute); font-size:clamp(14px,1.7vw,18px); }
+  #cap p:empty { display:none; }
+  #cap .lg { display:flex; align-items:center; gap:.5em; margin-top:.25em; }
+  #cap .lg i { width:.75em; height:.75em; border:1.5px solid var(--line); flex:none; }
+
+  #credit { position:fixed; left:24px; bottom:14px; font-size:12px; color:#8a837d; }
+  #prog { position:fixed; left:0; bottom:0; height:3px; background:#e2573a; width:0; transition:width .4s; }
+
+  #ui { position:fixed; right:16px; top:16px; display:flex; gap:6px; align-items:center; }
+  #ui button { width:38px; height:38px; border:1.5px solid var(--line); background:#fff; border-radius:50%;
+    font-size:15px; cursor:pointer; color:var(--ink); padding:0; }
+  #ui button:hover { background:#fdf3e7; }
+  #ui button.on { background:var(--ink); color:#fff; }
+  #ui span { font-size:13px; color:var(--mute); min-width:52px; text-align:center; font-variant-numeric:tabular-nums; }
+
+  #bar { position:fixed; height:14px; border-left:2px solid var(--ink); border-right:2px solid var(--ink);
+    transition:opacity .5s; pointer-events:none; }
+  #bar::before { content:""; position:absolute; left:0; right:0; top:6px; border-top:2px solid var(--ink); }
+  #bar b { position:absolute; left:0; right:0; bottom:20px; text-align:center; font-size:clamp(15px,2vw,20px); font-weight:600; white-space:nowrap; }
+
+  #lead { position:fixed; inset:0; width:100%; height:100%; pointer-events:none; transition:opacity .4s; }
+  #call { position:fixed; background:#fff; border:2px solid var(--line); font-size:clamp(14px,1.8vw,19px);
+    font-weight:500; padding:3px 9px; white-space:nowrap; transition:opacity .4s; pointer-events:none; }
+  #call.inset { padding:0; }
+  #call.inset svg { display:block; }
+  .hid { opacity:0 !important; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<svg id="lead"><line id="ln" stroke="#2a1a14" stroke-width="2"/><circle id="dot" r="3.5" fill="#2a1a14"/></svg>
+<div id="call" class="hid"></div>
+<div id="bar" class="hid"><b>20 micrometers</b></div>
+<div id="cap"><h1><i id="sw"></i><span id="ttl"></span></h1><p id="txt"></p><p id="note" class="note"></p></div>
+<div id="credit">3D model built entirely from code · drag to orbit · ← → to step</div>
+<div id="prog"></div>
+<div id="ui">
+  <button id="prev" title="Previous (←)">◀</button>
+  <button id="play" title="Play / pause (space)">❚❚</button>
+  <button id="next" title="Next (→)">▶</button>
+  <span id="cnt"></span>
+  <button id="snd" title="Narration">♪</button>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+
+/* ---------- helpers ---------- */
+const V = (x, y, z) => new THREE.Vector3(x, y, z);
+const PI = Math.PI, D2R = PI / 180;
+let seed = 11;
+const rnd = () => { seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+const rr = (a, b) => a + (b - a) * rnd();
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const easeIO = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+const easeBack = t => 1 + 2.70158 * Math.pow(t - 1, 3) + 1.70158 * Math.pow(t - 1, 2);
+
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setClearColor(0xffffff);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(36, 1, 0.1, 400);
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true; controls.enablePan = false; controls.minDistance = 4; controls.maxDistance = 160;
+
+scene.add(new THREE.AmbientLight(0xffffff, 1.9));
+const sun = new THREE.DirectionalLight(0xffffff, 1.35); sun.position.set(-7, 14, 9); scene.add(sun);
+
+const grad = new THREE.DataTexture(new Uint8Array([70, 165, 255]), 3, 1, THREE.RedFormat);
+grad.minFilter = grad.magFilter = THREE.NearestFilter; grad.needsUpdate = true;
+
+const toon = (color, side = THREE.FrontSide) => new THREE.MeshToonMaterial({ color, gradientMap: grad, side });
+const flat = (color, side = THREE.DoubleSide) => new THREE.MeshBasicMaterial({ color, side });
+const INK = new THREE.Color('#2a0f1e');
+const darken = c => new THREE.Color(c).lerp(INK, 0.68);
+function olMat(color, t) {
+  const m = new THREE.MeshBasicMaterial({ color, side: THREE.BackSide });
+  m.onBeforeCompile = sh => { sh.vertexShader = sh.vertexShader.replace('#include <begin_vertex>',
+    `vec3 transformed = position + normalize(normal) * ${t.toFixed(4)};`); };
+  m.customProgramCacheKey = () => 'ol' + t.toFixed(4);
+  return m;
+}
+/* toon mesh + inverted-hull outline */
+function inked(geo, color, t = 0.05, mat) {
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(geo, olMat(darken(color), t)), new THREE.Mesh(geo, mat || toon(color)));
+  return g;
+}
+function cylBetween(a, b, r, seg = 6) {
+  const d = b.clone().sub(a), len = d.length();
+  const g = new THREE.CylinderGeometry(r, r, len, seg, 1, true);
+  const q = new THREE.Quaternion().setFromUnitVectors(V(0, 1, 0), d.normalize());
+  g.applyMatrix4(new THREE.Matrix4().compose(a.clone().add(b).multiplyScalar(.5), q, V(1, 1, 1)));
+  return g;
+}
+
+/* ---------- cell shape ---------- */
+const RX = 10, RY = 4.6, RZ = 8.6;
+const W = a => 1 + 0.06 * Math.sin(3 * a + 0.6) + 0.035 * Math.sin(5 * a + 2.1) + 0.02 * Math.sin(2 * a);
+function blob(geo, rx, ry, rz, w = W) {
+  const p = geo.attributes.position;
+  for (let i = 0; i < p.count; i++) { const x = p.getX(i), z = p.getZ(i), k = w(Math.atan2(z, x)); p.setX(i, x * k); p.setZ(i, z * k); }
+  geo.scale(rx, ry, rz); return geo;
+}
+const wall = (a, y, f = 0.94) => { const k = Math.sqrt(Math.max(0, 1 - (y / (RY * .9)) ** 2)) * W(a) * f;
+  return V(Math.cos(a) * RX * k, y, Math.sin(a) * RZ * k); };
+
+const N = V(-1.5, 0, -0.3), RN = 3;           // nucleus
+const C = V(2.4, 0.9, 1.0);                   // centrosome
+const inCyto = p => (p.x / (RX * .84)) ** 2 + (p.y / (RY * .8)) ** 2 + (p.z / (RZ * .84)) ** 2 < 1
+  && p.y < 0.15 && p.distanceTo(N) > RN + 0.45;
+function cytoPoint() { for (;;) { const p = V(rr(-RX, RX), rr(-3.2, 0.15), rr(-RZ, RZ)); if (inCyto(p)) return p; } }
+
+/* ---------- animated parts ---------- */
+const parts = [];
+function part(obj, vis, o = {}) {
+  obj.userData.isPart = true;
+  parts.push({ obj, vis, mode: o.mode || 'pop', delay: o.delay || 0, keep: !!o.keep, lift: o.lift || 0,
+    s: 0, g: 1, target: 0, tChange: -1e9, baseY: obj.position.y, count: obj.count, op: -1, mats: null });
+  obj.visible = false;
+  return obj;
+}
+function matsOf(root) {
+  const out = new Set();
+  (function walk(o) {
+    if (o !== root && o.userData.isPart) return;
+    if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => out.add(m));
+    o.children.forEach(walk);
+  })(root);
+  return [...out];
+}
+
+/* ---------- steps ---------- */
+const mrnaDir = [V(0.8, -0.15, 0.58), V(0.5, -0.25, 0.83), V(0.97, -0.1, 0.2)].map(v => v.normalize());
+const rimPt = wall(72 * D2R, 0, 0.97);
+const steps = [
+  { id: 'intro', title: 'One human cell', t: [0, 0.4, 0], p: [0, 12, 25], dur: 5 },
+  { id: 'membrane', title: 'Cell membrane', sw: '#f4b183', text: 'A film of fats, two layers thick, with protein gates.',
+    t: [1.5, -0.5, 6.5], p: [3.5, 6.5, 18.5], call: { at: rimPt, inset: true, dx: -150, dy: -260 }, dur: 8 },
+  { id: 'nucleus', title: 'Nucleus', sw: '#7b68d9', text: 'Stores DNA: the instructions for making proteins.',
+    note: 'About 2 meters of DNA, drawn as loose thread.', t: [-1.2, 0.2, 0], p: [1.6, 9.5, 7.6], dur: 8 },
+  { id: 'pores', title: 'Nuclear pores', sw: '#e6e0fa', text: 'Gates through the wall of the nucleus.',
+    note: 'A real nucleus has thousands, far smaller.', t: [1.4, -0.4, 2.0], p: [5.8, 2.6, 9.2],
+    call: { at: N.clone().addScaledVector(mrnaDir[0], RN + 2.2), text: 'messenger RNA', dx: 40, dy: -90 }, dur: 8 },
+  { id: 'ribo', title: 'Ribosomes', sw: '#e8478b', text: 'Read messenger RNA and build proteins from it.',
+    note: 'A real cell has millions.', t: [2.2, -1, 2.6], p: [4.5, 5, 11.5], dur: 7 },
+  { id: 'rer', title: 'Rough ER', sw: '#4f7fe0', text: 'Folded sheets studded with ribosomes, where new proteins take shape.',
+    t: [-5.6, -0.3, 0.2], p: [-9.5, 8.5, 10.5], dur: 8 },
+  { id: 'ser', title: 'Smooth ER', sw: '#7cc4ee', text: 'A web of tubes that makes fats and stores calcium.',
+    t: [0, -0.9, 4.4], p: [0.5, 6.5, 13.5], dur: 7 },
+  { id: 'golgi', title: 'Golgi apparatus', sw: '#f2a93b', text: 'Finishes, sorts and ships proteins.',
+    t: [4.5, 0, -0.6], p: [9.5, 4.6, 7], call: { at: V(3.55, 0.5, -0.1), text: 'entry side', dx: -150, dy: -80 }, dur: 8 },
+  { id: 'mito', title: 'Mitochondria', sw: '#e2573a', text: 'Use oxygen to turn food into ATP, the cell’s fuel.',
+    note: 'A real cell has hundreds, often in a network.', t: [5.0, -0.2, 3.6], p: [7.2, 7, 11.5], dur: 8 },
+  { id: 'lyso', title: 'Lysosomes', sw: '#9a5be0', text: 'Bags of acid and enzymes that break down worn-out parts.',
+    note: 'Simplified: the part is first wrapped in membrane.', t: [6.8, -0.4, 1.6], p: [10.5, 5, 8], dur: 7 },
+  { id: 'perox', title: 'Peroxisomes', sw: '#b6d94c', text: 'Small sacs that break down fatty acids and neutralize toxic byproducts.',
+    t: [1.5, -1, 3.5], p: [2.5, 8, 13], dur: 7 },
+  { id: 'centro', title: 'Cytoskeleton', text: 'It starts at the centrosome, which anchors the cell’s internal tracks.',
+    t: [C.x, C.y, C.z], p: [C.x + 2.6, C.y + 3.4, C.z + 5.2], call: { at: C, text: 'centrosome: two centrioles', dx: 50, dy: -110 }, dur: 7 },
+  { id: 'cyto', title: 'Cytoskeleton', ghost: true,
+    text: '<span class="lg"><i style="background:#3cb86a"></i>Microtubules: tracks for cargo</span>' +
+          '<span class="lg"><i style="background:#e03a6c"></i>Actin filaments: shape the edge</span>' +
+          '<span class="lg"><i style="background:#9a6a3a"></i>Intermediate filaments: like rope</span>',
+    say: 'Microtubules are tracks for cargo. Actin filaments shape the edge. Intermediate filaments work like rope.',
+    t: [0, -1.5, 1.5], p: [0, 24, 13], dur: 9 },
+  { id: 'whole', title: 'One cell, assembled', text: 'Every part built from code, one organelle at a time.',
+    t: [0, -1.2, 0.6], p: [0, 17, 19], dur: 7 },
+  { id: 'many', title: 'About 30 trillion of them', text: 'make up one human body.', t: [0, 0, 1], p: [0, 62, 58], dur: 8 },
+];
+const IX = Object.fromEntries(steps.map((s, i) => [s.id, i]));
+const from = id => i => i >= IX[id];
+
+/* ---------- membrane: bowl + lid ---------- */
+{
+  const PEACH = '#f4b183', CREAM = '#fdf3e7';
+  const outer = inked(blob(new THREE.SphereGeometry(1, 96, 28, 0, 2 * PI, PI / 2, PI / 2), RX, RY, RZ), PEACH, 0.09);
+  const inner = new THREE.Mesh(blob(new THREE.SphereGeometry(1, 96, 28, 0, 2 * PI, PI / 2, PI / 2), RX * .94, RY * .9, RZ * .94),
+    toon(CREAM, THREE.BackSide));
+  const n = 192, pos = [], idx = [], edge = [];
+  for (let i = 0; i <= n; i++) {
+    const a = i / n * 2 * PI, k = W(a), x = Math.cos(a) * RX * k, z = Math.sin(a) * RZ * k;
+    pos.push(x, 0, z, x * .94, 0, z * .94); edge.push(V(x * .94, 0.01, z * .94));
+    if (i < n) { const b = i * 2; idx.push(b, b + 1, b + 2, b + 1, b + 3, b + 2); }
+  }
+  const rg = new THREE.BufferGeometry();
+  rg.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); rg.setIndex(idx);
+  const rim = new THREE.Mesh(rg, flat('#f9d3b0'));
+  const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(edge), new THREE.LineBasicMaterial({ color: '#a8552f' }));
+  scene.add(outer, inner, rim, line);
+
+  const lid = inked(blob(new THREE.SphereGeometry(1, 96, 28, 0, 2 * PI, 0, PI / 2), RX, RY, RZ), PEACH, 0.09);
+  scene.add(part(lid, i => i === IX.intro || i === IX.many, { mode: 'fade', lift: 5, keep: true }));
+}
+
+/* ---------- nucleus ---------- */
+{
+  const TH = 0.9, PURPLE = '#7b68d9';
+  const g = new THREE.Group(); g.position.copy(N);
+  const axis = V(0.2, 0.85, 0.45).normalize();
+  g.quaternion.setFromUnitVectors(V(0, 1, 0), axis);
+  const inv = g.quaternion.clone().invert();
+
+  g.add(inked(new THREE.SphereGeometry(RN, 64, 40, 0, 2 * PI, TH, PI - TH), PURPLE, 0.06));
+  g.add(new THREE.Mesh(new THREE.SphereGeometry(RN - 0.32, 64, 40, 0, 2 * PI, TH, PI - TH), toon('#c9bbf3', THREE.BackSide)));
+  const h = RN * Math.cos(TH), rOut = RN * Math.sin(TH), rIn = Math.sqrt((RN - 0.32) ** 2 - h * h);
+  const ring = new THREE.Mesh(new THREE.RingGeometry(rIn, rOut, 64).rotateX(-PI / 2), flat('#efeaff'));
+  ring.position.y = h; g.add(ring);
+
+  // chromatin: loose thread
+  for (let k = 0; k < 8; k++) {
+    const pts = []; for (let j = 0; j < 7; j++) pts.push(V(rr(-1, 1), rr(-1, 1), rr(-1, 1)).normalize().multiplyScalar(rr(0.9, 2.15)));
+    g.add(inked(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts, true), 90, 0.19, 8, true), '#b3a2ee', 0.035));
+  }
+  // nucleolus
+  const ng = new THREE.SphereGeometry(0.85, 28, 20), np = ng.attributes.position, v = V(0, 0, 0);
+  for (let i = 0; i < np.count; i++) { v.fromBufferAttribute(np, i);
+    v.multiplyScalar(1 + 0.13 * Math.sin(5 * v.x) * Math.sin(5 * v.y + 1) + 0.08 * Math.sin(7 * v.z + 2)); np.setXYZ(i, v.x, v.y, v.z); }
+  ng.computeVertexNormals();
+  const nucleolus = inked(ng, '#e0457b', 0.04); nucleolus.position.set(0.2, 0.5, 0.1); g.add(nucleolus);
+
+  // cap that closes the cut-away
+  const cap = inked(new THREE.SphereGeometry(RN, 64, 16, 0, 2 * PI, 0, TH), PURPLE, 0.06);
+  g.add(part(cap, from('whole'), { mode: 'fade', lift: 2.6 }));
+
+  // pores
+  const torus = new THREE.TorusGeometry(0.2, 0.075, 8, 18), disc = new THREE.CircleGeometry(0.15, 14);
+  const tm = toon('#ece6fb'), dm = flat('#43349c', THREE.FrontSide), Z = V(0, 0, 1);
+  const pore = n => { const p = new THREE.Group(); p.position.copy(n).multiplyScalar(RN + 0.015);
+    p.quaternion.setFromUnitVectors(Z, n); p.add(new THREE.Mesh(disc, dm), new THREE.Mesh(torus, tm)); return p; };
+  const M = 74; let k = 0;
+  for (let i = 0; i < M; i++) {
+    const y = 1 - 2 * (i + .5) / M, r = Math.sqrt(1 - y * y), a = i * 2.39996;
+    const n = V(Math.cos(a) * r, y, Math.sin(a) * r), ang = Math.acos(y);
+    if (ang < TH - 0.14) cap.add(pore(n));
+    else if (ang > TH + 0.14) g.add(part(pore(n), from('pores'), { delay: 0.3 + (k++) * 0.035 }));
+  }
+  mrnaDir.forEach(d => g.add(part(pore(d.clone().applyQuaternion(inv)), from('pores'))));
+  scene.add(part(g, from('nucleus')));
+
+  // messenger RNA leaving the pores
+  mrnaDir.forEach((d, i) => {
+    const u = V(0, 1, 0).cross(d).normalize(), w = d.clone().cross(u), pts = [];
+    for (let t = 0; t <= 6; t++) pts.push(N.clone().addScaledVector(d, RN + 0.05 + t * 0.4)
+      .addScaledVector(u, Math.sin(t * 1.7 + i) * 0.2).addScaledVector(w, Math.cos(t * 1.3 + i) * 0.14));
+    const m = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 40, 0.05, 6), toon('#1f9d93'));
+    m.position.copy(pts[0]); m.geometry.translate(-pts[0].x, -pts[0].y, -pts[0].z);
+    scene.add(part(m, from('pores'), { delay: 1.2 + i * 0.3 }));
+  });
+}
+
+/* ---------- rough ER + ribosomes ---------- */
+const sheets = [];
+{
+  for (let i = 0; i < 4; i++) sheets.push({ ri: 3.65 + i * 0.9, ro: 4.05 + i * 0.9, a0: (122 + 4 * i) * D2R, a1: (258 - 5 * i) * D2R, y0: -1.9 + i * 0.08, h: 2.5 - i * 0.28 });
+  const top = toon('#eef4ff'), side = toon('#4f7fe0');
+  sheets.forEach((s, i) => {
+    const sh = new THREE.Shape();
+    sh.absarc(0, 0, s.ro, -s.a1, -s.a0, false); sh.absarc(0, 0, s.ri, -s.a0, -s.a1, true);
+    const geo = new THREE.ExtrudeGeometry(sh, { depth: s.h, bevelEnabled: false, curveSegments: 56 }).rotateX(-PI / 2).translate(0, s.y0, 0);
+    const g = new THREE.Group(); g.position.copy(N);
+    g.add(new THREE.Mesh(geo, olMat(darken('#3558c0'), 0.045)), new THREE.Mesh(geo, [top, side]));
+    scene.add(part(g, from('rer'), { delay: i * 0.45 }));
+  });
+
+  const rg = new THREE.SphereGeometry(0.085, 8, 6), rm = toon('#e8478b'), m4 = new THREE.Matrix4();
+  const cloud = pts => { const im = new THREE.InstancedMesh(rg, rm, pts.length);
+    pts.forEach((p, i) => im.setMatrixAt(i, m4.makeTranslation(p.x, p.y, p.z))); im.frustumCulled = false; return im; };
+  const free = []; for (let i = 0; i < 420; i++) free.push(cytoPoint());
+  mrnaDir.forEach(d => { for (let t = 2; t <= 6; t += 2) free.unshift(N.clone().addScaledVector(d, RN + 0.05 + t * 0.4).add(V(0, 0.12, 0))); });
+  scene.add(part(cloud(free), from('ribo'), { mode: 'count' }));
+  const bound = [];
+  for (let i = 0; i < 900; i++) {
+    const s = sheets[i % 4], a = rr(s.a0, s.a1), topSide = rnd() < 0.3;
+    const r = topSide ? rr(s.ri, s.ro) : (rnd() < .5 ? s.ri - 0.07 : s.ro + 0.07);
+    const y = topSide ? s.y0 + s.h + 0.06 : rr(s.y0 + 0.4, s.y0 + s.h);
+    bound.push(V(N.x + r * Math.cos(a), N.y + y, N.z + r * Math.sin(a)));
+  }
+  scene.add(part(cloud(bound), from('rer'), { mode: 'count', delay: 1.6 }));
+}
+
+/* ---------- smooth ER ---------- */
+{
+  const nodes = [], id = (l, i, j) => l * 36 + i * 4 + j, geos = [];
+  for (let l = 0; l < 2; l++) for (let i = 0; i < 9; i++) for (let j = 0; j < 4; j++) {
+    const a = (28 + i * 10.5) * D2R + rr(-.05, .05), r = 3.95 + j * 0.8 + rr(-.18, .18);
+    nodes.push(V(N.x + r * Math.cos(a), -1.75 + l * 1.0 + rr(-.22, .22), N.z + r * Math.sin(a)));
+  }
+  const link = (a, b) => geos.push(cylBetween(nodes[a], nodes[b], 0.15, 7));
+  for (let l = 0; l < 2; l++) for (let i = 0; i < 9; i++) for (let j = 0; j < 4; j++) {
+    if (i < 8 && rnd() < .85) link(id(l, i, j), id(l, i + 1, j));
+    if (j < 3 && rnd() < .85) link(id(l, i, j), id(l, i, j + 1));
+    if (i < 8 && j < 3 && rnd() < .3) link(id(l, i, j), id(l, i + 1, j + 1));
+    if (l === 0 && rnd() < .35) link(id(0, i, j), id(1, i, j));
+  }
+  nodes.forEach(p => geos.push(new THREE.SphereGeometry(0.2, 10, 8).translate(p.x, p.y, p.z)));
+  const ctr = V(N.x + 5.1 * Math.cos(70 * D2R), -1.2, N.z + 5.1 * Math.sin(70 * D2R));
+  const g = inked(mergeGeometries(geos).translate(-ctr.x, -ctr.y, -ctr.z), '#7cc4ee', 0.04);
+  g.position.copy(ctr);
+  scene.add(part(g, from('ser')));
+}
+
+/* ---------- Golgi ---------- */
+{
+  const g = new THREE.Group(); g.position.set(4.5, 0, -0.6); g.rotation.set(0, 0.3, 0.22);
+  const c0 = new THREE.Color('#fbe9a0'), c1 = new THREE.Color('#e8641a');
+  for (let i = 0; i < 5; i++) {
+    const k = 1 - i * 0.085, geo = new THREE.SphereGeometry(1, 36, 24).scale(0.2, 1.75 * k, 1.3 * k);
+    const d = inked(geo, c0.clone().lerp(c1, i / 4), 0.04); d.position.x = -0.9 + i * 0.44;
+    g.add(part(d, from('golgi'), { delay: i * 0.3 }));
+  }
+  const vg = new THREE.SphereGeometry(1, 14, 10);
+  for (let i = 0; i < 16; i++) {
+    const v = inked(vg, '#f6cf4a', 0.12); const a = rr(0, 2 * PI), r = rr(1.5, 2.3);
+    v.position.set(rr(-1.3, 1.6), Math.cos(a) * r * 1.05, Math.sin(a) * r * 0.85); v.scale.setScalar(rr(0.13, 0.22));
+    g.add(part(v, from('golgi'), { delay: 1.6 + i * 0.07 }));
+  }
+  scene.add(g);
+}
+
+/* ---------- mitochondria ---------- */
+{
+  const RED = '#e2573a';
+  const list = [[3.2, 0.3, -3.4, 0.4], [5.6, 0, -3.9, -0.5], [0.6, 0.1, -5.6, 0.2], [7.0, -0.2, -1.9, 1.2], [4.0, 0.4, -5.6, 0.1],
+    [-0.2, -1.6, -3.9, -0.3], [5.2, 0.9, -1.9, -0.9], [2.0, 0.8, -4.4, 1.0], [7.4, -0.9, 3.3, 1.9]];
+  list.forEach(([x, y, z, ry], i) => {
+    const m = inked(new THREE.CapsuleGeometry(rr(.5, .6), rr(1.5, 2.1), 8, 20).rotateZ(PI / 2), RED, 0.045);
+    m.position.set(x, y, z); m.rotation.set(0, ry, rr(-.25, .25));
+    scene.add(part(m, from('mito'), { delay: 1.0 + i * 0.16 }));
+  });
+  // featured one, cut open to show the folded inner membrane
+  const L = 2.7, r = 0.78, pts = [];
+  for (let i = 0; i <= 10; i++) { const a = -PI / 2 + i / 10 * PI / 2; pts.push(new THREE.Vector2(r * Math.cos(a), -L / 2 + r * Math.sin(a))); }
+  for (let i = 0; i <= 10; i++) { const a = i / 10 * PI / 2; pts.push(new THREE.Vector2(r * Math.cos(a), L / 2 + r * Math.sin(a))); }
+  const stadium = (l, q) => { const s = new THREE.Shape(); s.moveTo(-l / 2, -q); s.lineTo(l / 2, -q); s.absarc(l / 2, 0, q, -PI / 2, PI / 2, false);
+    s.lineTo(-l / 2, q); s.absarc(-l / 2, 0, q, PI / 2, PI * 1.5, false); return s; };
+  const f = new THREE.Group(); f.position.set(5.2, -0.2, 4.5); f.rotation.set(0.5, 0.45, 0);
+  f.add(inked(new THREE.LatheGeometry(pts, 28, 0, PI).rotateZ(-PI / 2), RED, 0.045, toon(RED, THREE.DoubleSide)));
+  const layer = (geo, color, y) => { const m = new THREE.Mesh(geo.rotateX(-PI / 2), flat(color)); m.position.y = y; f.add(m); };
+  layer(new THREE.ShapeGeometry(stadium(L, r), 20), '#b8361f', 0.004);
+  layer(new THREE.ShapeGeometry(stadium(L, r - 0.13), 20), '#fde9df', 0.012);
+  const fold = [];
+  for (let i = 0; i < 8; i++) { const len = 0.62, s = i % 2 ? 1 : -1;
+    fold.push(new THREE.ShapeGeometry(stadium(len, 0.085), 8).rotateZ(PI / 2).translate(-L / 2 + 0.15 + i * (L - 0.3) / 7, s * (r - 0.13 - len / 2 - 0.02), 0)); }
+  layer(mergeGeometries(fold), RED, 0.02);
+  scene.add(part(f, from('mito')));
+}
+
+/* ---------- lysosomes, peroxisomes ---------- */
+{
+  const sg = new THREE.SphereGeometry(1, 24, 16);
+  [[7.3, -0.4, 1.2, .55], [6.0, -0.6, 1.9, .42], [8.2, -0.3, 0.2, .4], [6.5, -1.0, 3.0, .5], [2.7, -0.5, 6.3, .45], [7.6, -0.5, -3.4, .4]]
+    .forEach(([x, y, z, s], i) => { const m = inked(sg, '#9a5be0', 0.07); m.position.set(x, y, z); m.scale.setScalar(s);
+      scene.add(part(m, from('lyso'), { delay: i * 0.22 })); });
+  [[-2.6, -1.4, 5.9], [0.6, -0.6, 5.2], [-0.4, -0.4, 3.3], [3.3, -1.3, 4.4], [6.9, -0.2, 0.6], [5.6, -1.5, 3.0], [-6.5, -1.9, 4.2], [1.9, 0.0, -6.6]]
+    .forEach(([x, y, z], i) => { const m = inked(sg, '#b6d94c', 0.1); m.position.set(x, y, z); m.scale.setScalar(rr(.27, .34));
+      scene.add(part(m, from('perox'), { delay: i * 0.18 })); });
+}
+
+/* ---------- centrosome + cytoskeleton ---------- */
+{
+  const one = () => { const gs = []; for (let i = 0; i < 9; i++) { const a = i / 9 * 2 * PI;
+    gs.push(new THREE.CylinderGeometry(0.075, 0.075, 0.95, 7).translate(Math.cos(a) * 0.24, 0, Math.sin(a) * 0.24)); } return mergeGeometries(gs); };
+  const g = new THREE.Group(); g.position.copy(C);
+  const a = inked(one(), '#2e8b57', 0.022), b = inked(one().rotateZ(PI / 2).translate(0.55, -0.1, 0.35), '#2e8b57', 0.022);
+  a.rotation.set(0.3, 0, 0.25); g.add(a, b);
+  scene.add(part(g, from('centro'), { keep: true }));
+
+  const mt = [], ac = [], inter = [], only = i => i === IX.cyto;
+  for (let i = 0; i < 48; i++) mt.push(cylBetween(C, wall(i / 48 * 2 * PI + rr(-.05, .05), rr(-2.6, -0.1), 0.9), 0.03, 5));
+  for (let i = 0; i < 300; i++) { const al = rr(0, 2 * PI), p = wall(al, rr(-2.4, -0.05), rr(0.74, 0.92));
+    const d = V(rr(-1, 1), rr(-.25, .25), rr(-1, 1)).normalize().multiplyScalar(rr(.3, .6));
+    ac.push(cylBetween(p.clone().sub(d), p.clone().add(d), 0.028, 4)); }
+  for (let i = 0; i < 14; i++) { const al = i / 14 * 2 * PI + rr(-.1, .1), e = wall(al, rr(-2, -0.4), 0.8), pts = [];
+    const s = N.clone().add(V(Math.cos(al), -0.2, Math.sin(al)).multiplyScalar(RN + 0.15));
+    for (let t = 0; t <= 6; t++) pts.push(s.clone().lerp(e, t / 6).add(V(Math.sin(t * 2 + i) * .3, Math.sin(t * 1.4 + i) * .18, Math.cos(t * 2.3 + i) * .3)));
+    inter.push(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 40, 0.04, 5)); }
+  [[mt, '#3cb86a', 0], [ac, '#e03a6c', 0.7], [inter, '#9a6a3a', 1.4]].forEach(([gs, col, delay]) => {
+    const m = new THREE.Mesh(mergeGeometries(gs), toon(col));
+    scene.add(part(m, only, { mode: 'fade', keep: true, delay }));
+  });
+}
+
+/* ---------- neighbouring cells ---------- */
+for (let i = 0; i < 8; i++) {
+  const a = i / 8 * 2 * PI + 0.35, ph = rr(0, 6), R = i % 2 ? 21.5 : 29;
+  const w = t => 1 + 0.07 * Math.sin(3 * t + ph) + 0.04 * Math.sin(4 * t + ph * 2);
+  const c = inked(blob(new THREE.SphereGeometry(1, 56, 32), rr(8.5, 10.5), rr(4, 5), rr(8, 9.5), w), '#f4b183', 0.09);
+  c.position.set(Math.cos(a) * R * 1.05, rr(-.6, .6), Math.sin(a) * R * 0.92); c.rotation.y = rr(0, 6);
+  scene.add(part(c, i => i === IX.many, { delay: 0.8 + i * 0.15, keep: true }));
+}
+
+/* ---------- membrane close-up (2D inset) ---------- */
+function bilayer() {
+  let s = `<svg width="250" height="190" viewBox="0 0 250 190" xmlns="http://www.w3.org/2000/svg" font-family="inherit">`;
+  for (let i = 0; i < 16; i++) {
+    const x = 9 + i * 15.5; if (x > 92 && x < 158) continue;
+    for (const [hy, d] of [[62, 1], [132, -1]]) {
+      s += `<path d="M${x - 3} ${hy} q-4 ${d * 8} 0 ${d * 16} t0 ${d * 14}M${x + 3} ${hy} q4 ${d * 8} 0 ${d * 16} t0 ${d * 14}" fill="none" stroke="#b98a2a" stroke-width="1.6"/>`;
+      s += `<circle cx="${x}" cy="${hy}" r="7.2" fill="#f0a868" stroke="#8a3a1c" stroke-width="1.5"/>`;
+    }
+  }
+  s += `<path d="M100 50 q25 -8 50 0 q-7 47 0 94 q-25 8 -50 0 q7 -47 0 -94z" fill="#5f79e0" stroke="#2c3a99" stroke-width="1.8"/>`;
+  s += `<path d="M125 50 q-5 47 0 94" fill="none" stroke="#2c3a99" stroke-width="1.5"/>`;
+  s += `<rect x="-1" y="-1" width="82" height="24" fill="#fff" stroke="#2a1a14" stroke-width="2"/><text x="8" y="16" font-size="15" font-weight="600">Close-up</text>`;
+  s += `<text x="242" y="40" font-size="15" text-anchor="end" fill="#3a332e">outside the cell</text><text x="242" y="180" font-size="15" text-anchor="end" fill="#3a332e">inside the cell</text></svg>`;
+  return s;
+}
+
+/* ---------- playback ---------- */
+const $ = id => document.getElementById(id);
+const cap = $('cap'), call = $('call'), lead = $('lead'), bar = $('bar');
+let cur = -1, playing = true, sound = false, stepT = 0, tween = null, capTimer = 0;
+const kAspect = () => Math.max(1, 1.45 / camera.aspect);
+
+function say() {
+  if (!('speechSynthesis' in window)) return;
+  speechSynthesis.cancel(); if (!sound) return;
+  const s = steps[cur], txt = [s.title, s.say || s.text, s.note].filter(Boolean).join('. ').replace(/<[^>]+>/g, ' ');
+  speechSynthesis.speak(new SpeechSynthesisUtterance(txt));
+}
+function go(i, instant) {
+  i = clamp(i, 0, steps.length - 1); if (i === cur) return;
+  cur = i; stepT = 0;
+  const s = steps[i], t1 = V(...s.t), p1 = t1.clone().add(V(...s.p).sub(t1).multiplyScalar(kAspect()));
+  if (instant) { camera.position.copy(p1); controls.target.copy(t1); tween = null; }
+  else tween = { t: 0, p0: camera.position.clone(), q0: controls.target.clone(), p1, q1: t1 };
+  cap.classList.add('out'); call.classList.add('hid'); lead.classList.add('hid');
+  clearTimeout(capTimer);
+  capTimer = setTimeout(() => {
+    $('ttl').textContent = s.title; $('txt').innerHTML = s.text || ''; $('note').textContent = s.note || '';
+    $('sw').style.display = s.sw ? '' : 'none'; $('sw').style.background = s.sw || '';
+    cap.classList.remove('out');
+    if (s.call) { call.className = s.call.inset ? 'inset' : ''; call.innerHTML = s.call.inset ? bilayer() : s.call.text; }
+  }, instant ? 0 : 260);
+  bar.classList.toggle('hid', i !== IX.intro);
+  $('cnt').textContent = `${i + 1} / ${steps.length}`;
+  $('prog').style.width = (i / (steps.length - 1) * 100) + '%';
+  say();
+}
+function setPlay(v) { playing = v; $('play').textContent = v ? '❚❚' : '▶'; $('play').style.fontSize = v ? '12px' : '15px'; }
+$('prev').onclick = () => go(cur - 1);
+$('next').onclick = () => go(cur + 1);
+$('play').onclick = () => { if (!playing && cur === steps.length - 1) go(0); setPlay(!playing); };
+$('snd').onclick = () => { sound = !sound; $('snd').classList.toggle('on', sound); say(); };
+addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight') go(cur + 1); else if (e.key === 'ArrowLeft') go(cur - 1);
+  else if (e.key === ' ') { e.preventDefault(); $('play').onclick(); }
+});
+
+function resize() {
+  const w = innerWidth, h = innerHeight; renderer.setSize(w, h, false);
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize();
+
+const tmp = V(0, 0, 0);
+const project = p => { tmp.copy(p).project(camera); return [(tmp.x + 1) / 2 * innerWidth, (1 - tmp.y) / 2 * innerHeight]; };
+
+const h0 = parseInt(location.hash.slice(1));
+if (!isNaN(h0)) { setPlay(false); go(h0, true); } else { setPlay(true); go(0, true); }
+
+let last = performance.now(), now = 0;
+function frame(ms) {
+  requestAnimationFrame(frame);
+  const dt = clamp((ms - last) / 1000, 0, 0.05); last = ms; now += dt;
+
+  if (tween) {
+    tween.t = Math.min(1, tween.t + dt / 1.8); const k = easeIO(tween.t);
+    camera.position.lerpVectors(tween.p0, tween.p1, k); controls.target.lerpVectors(tween.q0, tween.q1, k);
+    if (tween.t >= 1) tween = null;
+  }
+  controls.enabled = !tween; controls.update();
+
+  const ghost = !!steps[cur].ghost;
+  for (const p of parts) {
+    const tg = p.vis(cur) ? 1 : 0;
+    if (tg !== p.target) { p.target = tg; p.tChange = now; }
+    if (now - p.tChange >= (tg ? p.delay : 0)) {
+      const d = p.mode === 'count' ? 2.2 : p.mode === 'fade' ? 0.9 : 0.55;
+      p.s = clamp(p.s + (tg ? 1 : -1) * dt / d, 0, 1);
+    }
+    p.g += ((ghost && !p.keep ? 0.13 : 1) - p.g) * Math.min(1, dt * 4);
+    p.obj.visible = p.s > 0.001;
+    if (p.mode === 'pop') p.obj.scale.setScalar(Math.max(1e-4, tg ? easeBack(p.s) : p.s) * (p.base ??= p.obj.scale.x));
+    else if (p.mode === 'fade') p.obj.position.y = p.baseY + (1 - easeIO(p.s)) * p.lift;
+    else p.obj.count = Math.round(p.s * p.count);
+    const op = (p.mode === 'fade' ? p.s : 1) * p.g;
+    if (Math.abs(op - p.op) > 0.004 || (op === 1 && p.op !== 1)) {
+      p.op = op;
+      for (const m of (p.mats ??= matsOf(p.obj))) {
+        const tr = op < 0.995; if (m.transparent !== tr) { m.transparent = tr; m.needsUpdate = true; }
+        m.opacity = op; m.depthWrite = op > 0.45;
+      }
+    }
+  }
+
+  renderer.render(scene, camera);
+
+  // overlays
+  const s = steps[cur];
+  if (cur === IX.intro) {
+    const [x0] = project(V(-RX * 1.02, 0, 0)), [x1] = project(V(RX * 1.02, 0, 0)), [, y] = project(V(0, RY + 0.4, 0));
+    bar.style.left = x0 + 'px'; bar.style.width = (x1 - x0) + 'px'; bar.style.top = Math.max(60, y - 34) + 'px';
+  }
+  if (s.call && !tween && stepT > 0.5) {
+    const [ax, ay] = project(s.call.at), w = call.offsetWidth, h = call.offsetHeight;
+    const x = clamp(ax + s.call.dx, 8, innerWidth - w - 8), y = clamp(ay + s.call.dy, 64, innerHeight - h - 8);
+    call.style.left = x + 'px'; call.style.top = y + 'px';
+    const ln = $('ln'); ln.setAttribute('x1', ax); ln.setAttribute('y1', ay);
+    ln.setAttribute('x2', clamp(ax, x, x + w)); ln.setAttribute('y2', clamp(ay, y, y + h));
+    $('dot').setAttribute('cx', ax); $('dot').setAttribute('cy', ay);
+    call.classList.remove('hid'); lead.classList.remove('hid');
+  }
+
+  stepT += dt;
+  if (playing && stepT > (s.dur || 7) && !(sound && window.speechSynthesis?.speaking)) {
+    if (cur < steps.length - 1) go(cur + 1); else setPlay(false);
+  }
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
